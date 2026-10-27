@@ -53,7 +53,8 @@ with st.sidebar:
     """)
 
 # ── Constantes ────────────────────────────────────────────────────────────────
-BLEU = RGBColor(0x00, 0x70, 0xC0)
+BLEU = RGBColor(0x00, 0x00, 0xFF)
+BLEU_TITRE = RGBColor(0x98, 0xB5, 0xD8)
 NOIR = RGBColor(0x00, 0x00, 0x00)
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
@@ -230,18 +231,42 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                     sel = st.session_state["section"]
                     date_fr = dt.strftime("%d/%m/%Y")
 
-                    # Mise à jour numéro
+                    # Jours en français pour le titre
+                    jours_fr = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
+                    mois_fr = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
+                               "JUILLET", "AOÛT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DÉCEMBRE"]
+                    jour_nom = jours_fr[dt.weekday()]
+                    mois_nom = mois_fr[dt.month - 1]
+                    date_titre = f"{jour_nom} {dt.day} {mois_nom} {dt.year}"
+
                     for para in doc2.paragraphs:
-                        if num and re.search(r'N°\s*\d+', para.text):
+                        txt = para.text.upper()
+
+                        # Mise à jour numéro + date dans le titre principal
+                        if "CR DE REUNION" in txt or "CR DE RÉUNION" in txt:
                             for run in para.runs:
-                                run.text = re.sub(r'N°\s*\d+', f'N°{num}', run.text)
-                        if rdv and "PROCHAIN RDV" in para.text.upper():
-                            for run in para.runs:
-                                if re.search(r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI)', run.text, re.IGNORECASE):
-                                    run.text = re.sub(
-                                        r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI)\s+.*',
-                                        rdv, run.text, flags=re.IGNORECASE
-                                    )
+                                # Remplacer le numéro
+                                if num:
+                                    run.text = re.sub(r'N°\s*\d+', f'N°{num}', run.text)
+                                # Remplacer la date complète (ex: MARDI 20 OCTOBRE 2026)
+                                run.text = re.sub(
+                                    r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
+                                    date_titre, run.text, flags=re.IGNORECASE
+                                )
+
+                        # Mise à jour prochain RDV
+                        if "PROCHAIN RDV" in txt and rdv:
+                            # Reconstruire le paragraphe entier avec la nouvelle valeur
+                            full_text = para.text
+                            new_text = re.sub(
+                                r'(MARDI|LUNDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}.*',
+                                rdv, full_text, flags=re.IGNORECASE
+                            )
+                            if new_text != full_text and para.runs:
+                                # Mettre tout le texte dans le premier run, vider les autres
+                                para.runs[0].text = new_text
+                                for run in para.runs[1:]:
+                                    run.text = ""
 
                     # Insertion dans le tableau
                     if sel and sel in smap:
