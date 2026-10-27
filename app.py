@@ -245,25 +245,35 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                         # Mise à jour numéro + date dans le titre principal
                         if "CR DE REUNION" in txt or "CR DE RÉUNION" in txt:
                             for run in para.runs:
-                                # Remplacer le numéro
+                                # Remplacer le numéro (N°28 → N°{num})
                                 if num:
                                     run.text = re.sub(r'N°\s*\d+', f'N°{num}', run.text)
-                                # Remplacer la date complète (ex: MARDI 20 OCTOBRE 2026)
+                                # Remplacer la date complète avec ou sans "DU" devant
+                                # ex: "DU MARDI 20 OCTOBRE 2026" ou "MARDI 20 OCTOBRE 2026"
                                 run.text = re.sub(
-                                    r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
+                                    r'\bDU\s+(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
+                                    f'DU {date_titre}', run.text, flags=re.IGNORECASE
+                                )
+                                run.text = re.sub(
+                                    r'(?<!DU\s)(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
                                     date_titre, run.text, flags=re.IGNORECASE
                                 )
 
                         # Mise à jour prochain RDV
                         if "PROCHAIN RDV" in txt and rdv:
-                            # Reconstruire le paragraphe entier avec la nouvelle valeur
                             full_text = para.text
+                            # Remplacer tout ce qui suit "le " (la date + heure + lieu)
                             new_text = re.sub(
-                                r'(MARDI|LUNDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}.*',
-                                rdv, full_text, flags=re.IGNORECASE
+                                r'(?<=\ble\s).*',
+                                rdv, full_text, flags=re.IGNORECASE | re.DOTALL
                             )
+                            if new_text == full_text:
+                                # Fallback : remplacer depuis le premier jour de semaine trouvé
+                                new_text = re.sub(
+                                    r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE).*',
+                                    rdv, full_text, flags=re.IGNORECASE | re.DOTALL
+                                )
                             if new_text != full_text and para.runs:
-                                # Mettre tout le texte dans le premier run, vider les autres
                                 para.runs[0].text = new_text
                                 for run in para.runs[1:]:
                                     run.text = ""
