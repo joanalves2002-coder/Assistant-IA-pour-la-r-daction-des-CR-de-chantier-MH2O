@@ -239,7 +239,15 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                     mois_nom = mois_fr[dt.month - 1]
                     date_titre = f"{jour_nom} {dt.day} {mois_nom} {dt.year}"
 
-                    for para in doc2.paragraphs:
+                    # Collecter TOUS les paragraphes : corps + cellules de tableaux
+                    tous_paragraphes = list(doc2.paragraphs)
+                    for tbl in doc2.tables:
+                        for row in tbl.rows:
+                            for cell in row.cells:
+                                for cp in cell.paragraphs:
+                                    tous_paragraphes.append(cp)
+
+                    for para in tous_paragraphes:
                         txt = para.text.upper()
 
                         # Mise à jour numéro + date dans le titre principal
@@ -248,27 +256,27 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                                 # Remplacer le numéro (N°28 → N°{num})
                                 if num:
                                     run.text = re.sub(r'N°\s*\d+', f'N°{num}', run.text)
-                                # Remplacer la date complète avec ou sans "DU" devant
-                                # ex: "DU MARDI 20 OCTOBRE 2026" ou "MARDI 20 OCTOBRE 2026"
+                                # Remplacer "DU MARDI 20 OCTOBRE 2026"
                                 run.text = re.sub(
                                     r'\bDU\s+(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
                                     f'DU {date_titre}', run.text, flags=re.IGNORECASE
                                 )
+                                # Remplacer "MARDI 20 OCTOBRE 2026" sans DU
                                 run.text = re.sub(
-                                    r'(?<!DU\s)(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
+                                    r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
                                     date_titre, run.text, flags=re.IGNORECASE
                                 )
 
                         # Mise à jour prochain RDV
                         if "PROCHAIN RDV" in txt and rdv:
                             full_text = para.text
-                            # Remplacer tout ce qui suit "le " (la date + heure + lieu)
+                            # Remplacer tout ce qui suit "le "
                             new_text = re.sub(
                                 r'(?<=\ble\s).*',
                                 rdv, full_text, flags=re.IGNORECASE | re.DOTALL
                             )
                             if new_text == full_text:
-                                # Fallback : remplacer depuis le premier jour de semaine trouvé
+                                # Fallback : depuis le premier jour de semaine
                                 new_text = re.sub(
                                     r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE).*',
                                     rdv, full_text, flags=re.IGNORECASE | re.DOTALL
