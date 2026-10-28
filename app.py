@@ -52,9 +52,12 @@ with st.sidebar:
     except Exception:
         cle_defaut = ""
     cle_defaut = cle_defaut or os.environ.get("ANTHROPIC_API_KEY", "")
-    api_key = st.text_input("Clé API Claude", value=cle_defaut, type="password", placeholder="sk-ant-...")
     if cle_defaut:
-        st.caption("🔑 Clé chargée automatiquement")
+        # Jamais renvoyée au navigateur : un champ pré-rempli pourrait être affiché avec 👁
+        api_key = cle_defaut
+        st.caption("🔑 Clé API chargée depuis les secrets")
+    else:
+        api_key = st.text_input("Clé API Claude", type="password", placeholder="sk-ant-...")
     st.markdown("---")
     st.markdown("""
 ### 📖 Comment utiliser
