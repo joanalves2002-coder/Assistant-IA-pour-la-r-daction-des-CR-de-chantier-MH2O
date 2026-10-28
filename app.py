@@ -2,9 +2,11 @@ import streamlit as st
 import anthropic
 import re
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import RGBColor
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from docx.table import _Cell, _Row
+from copy import deepcopy
 import io
 import os
 from datetime import date, timedelta
@@ -70,33 +72,72 @@ NOIR = RGBColor(0x00, 0x00, 0x00)
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
-def ecrire_cellule_texte(cell, texte, nouveau=True):
-    """Calibri 8pt, bleu si nouveau, entreprises (MAJUSCULES) en gras."""
-    para = cell.paragraphs[0]
-    # Vider les runs existants
-    for run in para.runs:
-        run.text = ""
-    # Découper : mots tout en majuscules vs reste
-    tokens = re.split(r'(\b[A-Z]{2}[A-Z0-9\-&/]*\b)', texte)
-    couleur = BLEU if nouveau else NOIR
+def ecrire_dans_cellule(cell, texte, gras_majuscules=False):
+    """Écrit en bleu en reprenant la police de la cellule ; entreprises (MAJUSCULES) en gras si demandé."""
+    paras = cell.paragraphs
+    for para in paras[1:]:
+        para._p.getparent().remove(para._p)
+    para = paras[0]
+    # Mise en forme du premier run existant (police, taille…) à réutiliser
+    run_modele = next((r for r in para.runs if r.text.strip()), None)
+    rpr = run_modele._r.rPr if run_modele is not None else None
+    if rpr is None and para._p.pPr is not None:
+        # Cellule vide : Word garde la mise en forme sur la marque de paragraphe
+        rpr = para._p.pPr.find(qn("w:rPr"))
+    rpr = deepcopy(rpr) if rpr is not None else None
+    for enfant in list(para._p):
+        if enfant.tag != qn("w:pPr"):
+            para._p.remove(enfant)
+    tokens = re.split(r'(\b[A-Z]{2}[A-Z0-9\-&/]*\b)', texte) if gras_majuscules else [texte]
     for token in tokens:
         if not token:
             continue
         run = para.add_run(token)
-        run.font.name = "Calibri"
-        run.font.size = Pt(8)
-        run.font.color.rgb = couleur
-        run.bold = bool(re.match(r'^[A-Z]{2}[A-Z0-9\-&/]*$', token))
+        if rpr is not None:
+            run._r.insert(0, deepcopy(rpr))
+        run.font.color.rgb = BLEU
+        if gras_majuscules:
+            run.bold = bool(re.match(r'^[A-Z]{2}[A-Z0-9\-&/]*$', token))
 
-def ecrire_cellule_simple(cell, texte, nouveau=True):
-    """Calibri 8pt, bleu si nouveau."""
-    para = cell.paragraphs[0]
-    for run in para.runs:
-        run.text = ""
-    run = para.add_run(texte)
-    run.font.name = "Calibri"
-    run.font.size = Pt(8)
-    run.font.color.rgb = BLEU if nouveau else NOIR
+
+def ligne_modele(table):
+    """Dernière ligne remplie du tableau, ou None."""
+    return next((r for r in reversed(table.rows[1:]) if r.cells[0].text.strip()), None)
+
+
+def ajouter_ligne(table, modele):
+    """Nouvelle ligne copiée sur le modèle : mêmes largeurs, bordures et alignements."""
+    if modele is None:
+        row = table.add_row()
+    else:
+        tr = deepcopy(modele._tr)
+        table.rows[-1]._tr.addnext(tr)
+        row = _Row(tr, table)
+    # Cellules réelles (une cellule fusionnée n'apparaît qu'une fois)
+    return [_Cell(tc, table) for tc in row._tr.tc_lst]
+
+
+def colonnes_du_tableau(table, nb_cellules):
+    """Repère les colonnes d'après l'en-tête (ACTION PAR, NOTE LE, POUR LE, FAIT LE)."""
+    roles = {"texte": 0}
+    entetes = [_Cell(tc, table).text.upper() for tc in table.rows[0]._tr.tc_lst]
+    if len(entetes) == nb_cellules:
+        for i, nom in enumerate(entetes[1:], start=1):
+            if "ACTION" in nom or "RESP" in nom:
+                roles.setdefault("responsable", i)
+            elif "NOTE" in nom:
+                roles.setdefault("note_le", i)
+            elif "POUR" in nom or "CHÉANCE" in nom or "CHEANCE" in nom:
+                roles.setdefault("pour_le", i)
+            elif "FAIT" in nom:
+                roles.setdefault("fait_le", i)
+    if len(roles) == 1:
+        # En-tête non reconnu : ordre habituel
+        for i, role in enumerate(["responsable", "note_le", "pour_le", "fait_le"], start=1):
+            if i < nb_cellules:
+                roles[role] = i
+    return roles
+
 
 JOURS_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
 MOIS_FR = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
@@ -272,16 +313,17 @@ Reformule ces notes brutes en points de CR professionnels et range chacun dans l
 RÈGLES :
 - Chaque point = une phrase courte et factuelle
 - Noms d'entreprises en MAJUSCULES (SERBOIS, BAZZI, ENEDIS, ROC...)
-- Statut : PA (Pour Action), PM (Pour Mémoire), EN ATT (En Attente), FAIT, ou date DD/MM/YY si échéance
-- Responsable : l'entreprise ou l'intervenant concerné (ex : SERBOIS, MH2O)
-- Le texte ne contient ni le statut ni le responsable entre parenthèses : ils vont dans leurs propres champs
+- Action par : l'entreprise ou l'intervenant qui doit agir (ex : SERBOIS, MH2O)
+- Pour le : échéance au format JJ-MM-AA si les notes en donnent une (« pour le 6/11 », « avant vendredi »…), sinon vide
+- Fait : vrai uniquement si l'action est entièrement terminée (« reste la façade » = pas fait)
+- Le texte ne contient ni l'échéance ni le responsable entre parenthèses : ils vont dans leurs propres champs
 - Section : choisis celle qui correspond le mieux au sujet du point
 - Entreprises déjà connues sur ce chantier (respecte exactement cette orthographe, même si la note est approximative) : {entreprises_txt or "aucune"}
 
-EXEMPLES (texte → statut, responsable) :
-MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → PA, SERBOIS
-Raccordement ENEDIS prévu le 03/04/26, confirmation attendue. → EN ATT, MH2O
-Avancement peinture BAZZI : 80% Bâtiment 1, retard de 2 semaines. → PA, BAZZI
+EXEMPLES (texte → action par, pour le, fait) :
+MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → SERBOIS, 06-11-26, non
+Raccordement ENEDIS prévu le 03-04-26, confirmation attendue. → MH2O, (vide), non
+Retouches peinture cage d'escalier A effectuées par BAZZI. → BAZZI, (vide), oui
 
 SECTIONS DISPONIBLES :
 {chr(10).join("- " + nom for nom in sections)}
@@ -289,7 +331,7 @@ SECTIONS DISPONIBLES :
 Notes :
 {notes}
 
-CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
+CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strftime('%d-%m-%y')}"""
 
                     # L'IA remplit un « formulaire » : chaque colonne du tableau séparément
                     outil = {
@@ -305,10 +347,11 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                                         "properties": {
                                             "section": {"type": "string", "enum": list(sections)},
                                             "texte": {"type": "string"},
-                                            "statut": {"type": "string", "description": "PA, PM, EN ATT, FAIT ou date DD/MM/YY"},
                                             "responsable": {"type": "string"},
+                                            "pour_le": {"type": "string", "description": "Échéance JJ-MM-AA ou vide"},
+                                            "fait": {"type": "boolean"},
                                         },
-                                        "required": ["section", "texte", "statut", "responsable"],
+                                        "required": ["section", "texte", "responsable", "pour_le", "fait"],
                                     },
                                 }
                             },
@@ -344,14 +387,15 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
             key="points_edites",
             num_rows="dynamic",
             use_container_width=True,
-            column_order=["section", "texte", "statut", "responsable"],
+            column_order=["section", "texte", "responsable", "pour_le", "fait"],
             column_config={
                 "section": st.column_config.SelectboxColumn(
                     "Section", options=list(st.session_state["sections"]), required=True, width="medium"
                 ),
                 "texte": st.column_config.TextColumn("Texte", width="large"),
-                "statut": st.column_config.TextColumn("Statut", width="small"),
-                "responsable": st.column_config.TextColumn("Responsable", width="small"),
+                "responsable": st.column_config.TextColumn("Action par", width="small"),
+                "pour_le": st.column_config.TextColumn("Pour le", width="small", help="Échéance JJ-MM-AA"),
+                "fait": st.column_config.CheckboxColumn("Fait", width="small"),
             },
         )
 
@@ -364,7 +408,7 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                     dt = st.session_state["date_cr"]
                     rdv = st.session_state["prochain"]
                     smap = st.session_state["sections"]
-                    date_fr = dt.strftime("%d/%m/%Y")
+                    date_cr_fmt = dt.strftime("%d-%m-%y")  # format du CR : 28-10-26
 
                     # Jours en français pour le titre
                     date_titre = f"{JOURS_FR[dt.weekday()]} {dt.day} {MOIS_FR[dt.month - 1]} {dt.year}"
@@ -412,26 +456,26 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
 
                     # Insertion dans le tableau
                     nb_ajouts = 0
+                    modeles = {}  # une ligne d'origine par tableau, choisie avant tout ajout
                     for point in points_edites:
                         texte = (point.get("texte") or "").strip()
                         if not texte or point.get("section") not in smap:
                             continue
-                        statut = (point.get("statut") or "").strip()
-                        resp = (point.get("responsable") or "").strip()
                         table = doc2.tables[smap[point["section"]]]
-                        nb_cols = len(table.columns)
-                        row = table.add_row()
-                        cells = row.cells
-
-                        ecrire_cellule_texte(cells[0], texte, nouveau=True)
-                        if nb_cols > 1:
-                            ecrire_cellule_simple(cells[1], resp, nouveau=True)
-                        if nb_cols > 2:
-                            ecrire_cellule_simple(cells[2], date_fr, nouveau=True)
-                        if nb_cols > 3:
-                            ecrire_cellule_simple(cells[3], statut, nouveau=True)
-                        if nb_cols > 4:
-                            ecrire_cellule_simple(cells[4], "", nouveau=False)
+                        modele = modeles.setdefault(smap[point["section"]], ligne_modele(table))
+                        cells = ajouter_ligne(table, modele)
+                        roles = colonnes_du_tableau(table, len(cells))
+                        valeurs = {
+                            "texte": texte,
+                            "responsable": (point.get("responsable") or "").strip(),
+                            "note_le": date_cr_fmt,
+                            "pour_le": (point.get("pour_le") or "").strip().replace("/", "-"),
+                            "fait_le": date_cr_fmt if point.get("fait") else "",
+                        }
+                        # Toutes les cellules copiées sont vidées, puis remplies selon leur colonne
+                        for i, cell in enumerate(cells):
+                            role = next((r for r, idx in roles.items() if idx == i), None)
+                            ecrire_dans_cellule(cell, valeurs.get(role, ""), gras_majuscules=(role == "texte"))
                         nb_ajouts += 1
 
                     output = io.BytesIO()
