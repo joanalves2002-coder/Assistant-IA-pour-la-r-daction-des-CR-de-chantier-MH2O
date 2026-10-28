@@ -3,6 +3,8 @@ import anthropic
 import re
 from docx import Document
 from docx.shared import Pt, RGBColor
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 import io
 import os
 from datetime import date, timedelta
@@ -134,13 +136,31 @@ MOTS_EXCLUS = {
 
 
 def tous_les_paragraphes(doc):
-    """Paragraphes du corps + ceux des cellules de tableaux."""
-    paragraphes = list(doc.paragraphs)
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                paragraphes.extend(cell.paragraphs)
+    """Tous les paragraphes : corps, tableaux, zones de texte, en-têtes et pieds de page."""
+    racines = [doc.element.body]
+    for sec in doc.sections:
+        for hf in (sec.header, sec.first_page_header, sec.even_page_header,
+                   sec.footer, sec.first_page_footer, sec.even_page_footer):
+            # Un en-tête lié au précédent n'a pas de contenu propre
+            if not hf.is_linked_to_previous:
+                racines.append(hf._element)
+    paragraphes, vus = [], set()
+    for racine in racines:
+        if id(racine) in vus:
+            continue
+        vus.add(id(racine))
+        paragraphes.extend(Paragraph(p, None) for p in racine.iter(qn("w:p")))
     return paragraphes
+
+
+def remplacer_texte_paragraphe(para, nouveau):
+    """Remplace le texte d'un paragraphe découpé en plusieurs runs, en gardant la mise en forme du 1er."""
+    runs = [r for r in para.runs if r.text]
+    if not runs:
+        return
+    runs[0].text = nouveau
+    for run in runs[1:]:
+        run.text = ""
 
 
 def infos_cr_precedent(doc):
@@ -344,21 +364,20 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                         txt = para.text.upper()
 
                         # Mise à jour numéro + date dans le titre principal
+                        # Travail sur le texte complet : Word découpe souvent le titre en plusieurs runs
                         if "CR DE REUNION" in txt or "CR DE RÉUNION" in txt:
-                            for run in para.runs:
-                                # Remplacer le numéro (N°28 → N°{num})
-                                if num:
-                                    run.text = re.sub(r'N°\s*\d+', f'N°{num}', run.text)
-                                # Remplacer "DU MARDI 20 OCTOBRE 2026"
-                                run.text = re.sub(
-                                    r'\bDU\s+(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
-                                    f'DU {date_titre}', run.text, flags=re.IGNORECASE
-                                )
-                                # Remplacer "MARDI 20 OCTOBRE 2026" sans DU
-                                run.text = re.sub(
-                                    r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d+\s+\w+\s+\d{4}',
-                                    date_titre, run.text, flags=re.IGNORECASE
-                                )
+                            full_text = para.text
+                            new_text = full_text
+                            # Remplacer le numéro (N°28 → N°{num})
+                            if num:
+                                new_text = re.sub(r'N°\s*\d+', f'N°{num}', new_text)
+                            # Remplacer "MARDI 20 OCTOBRE 2026" (avec ou sans DU devant)
+                            new_text = re.sub(
+                                r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE)\s+\d{1,2}\s+\w+\s+\d{4}',
+                                date_titre, new_text, flags=re.IGNORECASE
+                            )
+                            if new_text != full_text:
+                                remplacer_texte_paragraphe(para, new_text)
 
                         # Mise à jour prochain RDV
                         if "PROCHAIN RDV" in txt and rdv:
@@ -374,10 +393,8 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                                     r'(LUNDI|MARDI|MERCREDI|JEUDI|VENDREDI|SAMEDI|DIMANCHE).*',
                                     rdv, full_text, flags=re.IGNORECASE | re.DOTALL
                                 )
-                            if new_text != full_text and para.runs:
-                                para.runs[0].text = new_text
-                                for run in para.runs[1:]:
-                                    run.text = ""
+                            if new_text != full_text:
+                                remplacer_texte_paragraphe(para, new_text)
 
                     # Insertion dans le tableau
                     if sel and sel in smap:
