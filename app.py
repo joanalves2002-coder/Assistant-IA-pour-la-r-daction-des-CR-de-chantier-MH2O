@@ -57,9 +57,9 @@ with st.sidebar:
 ### 📖 Comment utiliser
 1. Entre ta clé API Claude (ou mets-la dans `.streamlit/secrets.toml`)
 2. Upload le Word du CR précédent
-3. Renseigne les infos du nouveau CR
-4. Choisis la section à mettre à jour
-5. Saisis tes notes brutes
+3. Vérifie les infos du nouveau CR (pré-remplies)
+4. Saisis toutes tes notes brutes, toutes sections confondues
+5. Vérifie le tableau des points générés
 6. Génère et télécharge le nouveau CR
     """)
 
@@ -97,31 +97,6 @@ def ecrire_cellule_simple(cell, texte, nouveau=True):
     run.font.name = "Calibri"
     run.font.size = Pt(8)
     run.font.color.rgb = BLEU if nouveau else NOIR
-
-def parse_ligne(ligne):
-    """Extrait (texte_propre, statut, responsable) d'une ligne de CR."""
-    ligne = ligne.strip()
-    ligne = re.sub(r'^[-•*]\s*', '', ligne)
-
-    responsable = ""
-    statut = ""
-
-    # Responsable : dernier (contenu) en fin de ligne
-    m = re.search(r'\(([^)]+)\)\s*$', ligne)
-    if m:
-        responsable = m.group(1).strip()
-        ligne = ligne[:m.start()].strip().rstrip('.')
-
-    # Statut : PA, PM, EN ATT, FAIT, ou date DD/MM/YY
-    for pat in [r'\b(PA|PM|EN ATT|EN ATTENTE|FAIT)\b', r'\b(\d{2}/\d{2}/\d{2,4})\b']:
-        ms = re.search(pat, ligne, re.IGNORECASE)
-        if ms:
-            statut = ms.group(1).upper()
-            ligne = (ligne[:ms.start()] + ligne[ms.end():]).strip().rstrip('.')
-            break
-
-    return ligne.strip(), statut, responsable
-
 
 JOURS_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
 MOIS_FR = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
@@ -265,18 +240,17 @@ if uploaded_file:
     )
 
     # ── Section ───────────────────────────────────────────────────────────────
-    st.markdown("### 🎯 Étape 3 — Section à mettre à jour")
+    st.markdown("### 🎯 Étape 3 — Sections du CR")
     if sections:
-        section = st.selectbox("Section :", options=list(sections.keys()))
+        st.caption("L'IA range chaque point dans la bonne section : " + " · ".join(sections))
     else:
         st.warning("⚠️ Aucune section détectée.")
-        section = None
 
     # ── Notes ─────────────────────────────────────────────────────────────────
     st.markdown("### ✏️ Étape 4 — Notes brutes")
     notes = st.text_area(
-        "Tes notes de réunion :",
-        height=200,
+        "Tes notes de réunion (toutes sections confondues) :",
+        height=250,
         placeholder="- serbois retard bat3\n- bazzi peinture 80% bat1\n- enedis raccordement prévu 3 avril"
     )
 
@@ -286,41 +260,72 @@ if uploaded_file:
             st.error("⚠️ Entre ta clé API dans la barre latérale")
         elif not notes.strip():
             st.error("⚠️ Saisis tes notes")
+        elif not sections:
+            st.error("⚠️ Aucune section où insérer les points")
         else:
             with st.spinner("L'IA reformule tes notes..."):
                 try:
                     client = anthropic.Anthropic(api_key=api_key)
                     prompt = f"""Tu es assistant MOE chez MH2O, ingénierie du bâtiment.
-Reformule ces notes brutes en points de CR professionnels.
+Reformule ces notes brutes en points de CR professionnels et range chacun dans la bonne section du CR.
 
 RÈGLES :
 - Chaque point = une phrase courte et factuelle
 - Noms d'entreprises en MAJUSCULES (SERBOIS, BAZZI, ENEDIS, ROC...)
-- Statut en fin : PA (Pour Action), PM (Pour Mémoire), EN ATT (En Attente), ou date DD/MM/YY si échéance
-- Responsable entre parenthèses : PA (SERBOIS)
-- Format : Texte. STATUT (RESPONSABLE)
-- Pas d'introduction, commence directement par les points
+- Statut : PA (Pour Action), PM (Pour Mémoire), EN ATT (En Attente), FAIT, ou date DD/MM/YY si échéance
+- Responsable : l'entreprise ou l'intervenant concerné (ex : SERBOIS, MH2O)
+- Le texte ne contient ni le statut ni le responsable entre parenthèses : ils vont dans leurs propres champs
+- Section : choisis celle qui correspond le mieux au sujet du point
 - Entreprises déjà connues sur ce chantier (respecte exactement cette orthographe, même si la note est approximative) : {entreprises_txt or "aucune"}
 
-EXEMPLES :
-MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. PA (SERBOIS)
-Raccordement ENEDIS prévu le 03/04/26, confirmation attendue. EN ATT (MH2O)
-Avancement peinture BAZZI : 80% Bâtiment 1, retard de 2 semaines. PA (BAZZI)
+EXEMPLES (texte → statut, responsable) :
+MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → PA, SERBOIS
+Raccordement ENEDIS prévu le 03/04/26, confirmation attendue. → EN ATT, MH2O
+Avancement peinture BAZZI : 80% Bâtiment 1, retard de 2 semaines. → PA, BAZZI
+
+SECTIONS DISPONIBLES :
+{chr(10).join("- " + nom for nom in sections)}
 
 Notes :
 {notes}
 
-Section : {section}
 CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
 
+                    # L'IA remplit un « formulaire » : chaque colonne du tableau séparément
+                    outil = {
+                        "name": "enregistrer_points",
+                        "description": "Enregistre les points du CR, un par ligne de tableau.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "points": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "section": {"type": "string", "enum": list(sections)},
+                                            "texte": {"type": "string"},
+                                            "statut": {"type": "string", "description": "PA, PM, EN ATT, FAIT ou date DD/MM/YY"},
+                                            "responsable": {"type": "string"},
+                                        },
+                                        "required": ["section", "texte", "statut", "responsable"],
+                                    },
+                                }
+                            },
+                            "required": ["points"],
+                        },
+                    }
                     msg = client.messages.create(
                         model="claude-sonnet-4-6",
-                        max_tokens=1500,
+                        max_tokens=4000,
+                        tools=[outil],
+                        tool_choice={"type": "tool", "name": "enregistrer_points"},
                         messages=[{"role": "user", "content": prompt}]
                     )
+                    reponse = next(b.input for b in msg.content if b.type == "tool_use")
+                    st.session_state.pop("points_edites", None)
                     st.session_state.update({
-                        "points": msg.content[0].text,
-                        "section": section,
+                        "points": reponse["points"],
                         "sections": sections,
                         "num_cr": num_cr,
                         "date_cr": date_cr,
@@ -333,11 +338,21 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
     # ── Résultat & export ─────────────────────────────────────────────────────
     if "points" in st.session_state:
         st.markdown("### ✅ Étape 5 — Points générés")
-        points_edites = st.text_area(
-            "Vérifie et corrige si besoin :",
-            value=st.session_state["points"],
-            height=280,
-            key="points_edites"
+        st.caption("Vérifie et corrige directement dans le tableau (ajout / suppression de lignes possibles).")
+        points_edites = st.data_editor(
+            st.session_state["points"],
+            key="points_edites",
+            num_rows="dynamic",
+            use_container_width=True,
+            column_order=["section", "texte", "statut", "responsable"],
+            column_config={
+                "section": st.column_config.SelectboxColumn(
+                    "Section", options=list(st.session_state["sections"]), required=True, width="medium"
+                ),
+                "texte": st.column_config.TextColumn("Texte", width="large"),
+                "statut": st.column_config.TextColumn("Statut", width="small"),
+                "responsable": st.column_config.TextColumn("Responsable", width="small"),
+            },
         )
 
         st.markdown("### 📥 Étape 6 — Générer le Word")
@@ -349,7 +364,6 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                     dt = st.session_state["date_cr"]
                     rdv = st.session_state["prochain"]
                     smap = st.session_state["sections"]
-                    sel = st.session_state["section"]
                     date_fr = dt.strftime("%d/%m/%Y")
 
                     # Jours en français pour le titre
@@ -397,27 +411,28 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                                 remplacer_texte_paragraphe(para, new_text)
 
                     # Insertion dans le tableau
-                    if sel and sel in smap:
-                        table = doc2.tables[smap[sel]]
+                    nb_ajouts = 0
+                    for point in points_edites:
+                        texte = (point.get("texte") or "").strip()
+                        if not texte or point.get("section") not in smap:
+                            continue
+                        statut = (point.get("statut") or "").strip()
+                        resp = (point.get("responsable") or "").strip()
+                        table = doc2.tables[smap[point["section"]]]
                         nb_cols = len(table.columns)
+                        row = table.add_row()
+                        cells = row.cells
 
-                        for ligne in points_edites.strip().split('\n'):
-                            ligne = ligne.strip()
-                            if not ligne or ligne.startswith('#'):
-                                continue
-                            texte, statut, resp = parse_ligne(ligne)
-                            row = table.add_row()
-                            cells = row.cells
-
-                            ecrire_cellule_texte(cells[0], texte, nouveau=True)
-                            if nb_cols > 1:
-                                ecrire_cellule_simple(cells[1], resp, nouveau=True)
-                            if nb_cols > 2:
-                                ecrire_cellule_simple(cells[2], date_fr, nouveau=True)
-                            if nb_cols > 3:
-                                ecrire_cellule_simple(cells[3], statut, nouveau=True)
-                            if nb_cols > 4:
-                                ecrire_cellule_simple(cells[4], "", nouveau=False)
+                        ecrire_cellule_texte(cells[0], texte, nouveau=True)
+                        if nb_cols > 1:
+                            ecrire_cellule_simple(cells[1], resp, nouveau=True)
+                        if nb_cols > 2:
+                            ecrire_cellule_simple(cells[2], date_fr, nouveau=True)
+                        if nb_cols > 3:
+                            ecrire_cellule_simple(cells[3], statut, nouveau=True)
+                        if nb_cols > 4:
+                            ecrire_cellule_simple(cells[4], "", nouveau=False)
+                        nb_ajouts += 1
 
                     output = io.BytesIO()
                     doc2.save(output)
@@ -430,7 +445,7 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         use_container_width=True
                     )
-                    st.success("✅ CR généré ! Télécharge le fichier ci-dessus.")
+                    st.success(f"✅ CR généré ({nb_ajouts} points insérés) ! Télécharge le fichier ci-dessus.")
 
                 except Exception as e:
                     st.error(f"Erreur : {e}")
