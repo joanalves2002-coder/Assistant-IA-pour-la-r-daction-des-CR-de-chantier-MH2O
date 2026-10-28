@@ -222,6 +222,15 @@ def entreprises_connues(doc, index_tables):
     return sorted(set(noms), key=lambda n: -noms.count(n))
 
 
+def apercu_sections(doc, sections, nb=4):
+    """Derniers points de chaque section, pour que l'IA voie de quoi parle chacune."""
+    apercu = {}
+    for nom, i in sections.items():
+        textes = [" ".join(r.cells[0].text.split()) for r in doc.tables[i].rows[1:]]
+        apercu[nom] = [t[:150] for t in textes if t][-nb:]
+    return apercu
+
+
 def intervenants_du_chantier(doc):
     """Tableau des intervenants (en-tête DESIGNATION) : [{"lot": ..., "entreprise": ...}].
     Entreprise vide = pas encore désignée."""
@@ -273,6 +282,7 @@ if uploaded_file:
 
     num_prec, heure_prec = infos_cr_precedent(doc)
     intervenants = intervenants_du_chantier(doc)
+    apercu = apercu_sections(doc, sections)
     entreprises = entreprises_connues(doc, sections.values())
 
     st.success(f"✅ {len(doc.tables)} tableaux trouvés · {len(sections)} sections détectées")
@@ -353,8 +363,12 @@ RÈGLES :
 - Pour le : échéance au format JJ-MM-AA si les notes en donnent une (« pour le 6/11 », « avant vendredi »…), sinon vide
 - Fait le : vide si l'action n'est pas entièrement terminée (« reste la façade » = pas fait) ;
   si elle est terminée, la date de réalisation au format JJ-MM-AA quand les notes la précisent (« fait le 20/10 », « fait lundi »…), sinon FAIT
-- Le texte ne contient ni l'échéance ni le responsable entre parenthèses : ils vont dans leurs propres champs
-- Section : choisis celle qui correspond le mieux au sujet du point
+- Le texte ne contient pas le responsable entre parenthèses ; la date d'un événement (réunion, livraison, visite…) reste dans le texte,
+  « pour le » est réservé à l'échéance d'une action demandée
+- Section : traite chaque note indépendamment, sans reprendre l'entreprise ou la section de la note précédente
+  · une section « Lot … – Entreprise X » seulement si la note concerne cette entreprise ou ce corps d'état
+  · une note qui ne vise pas une entreprise précise (réunion échantillons, réunion de coordination, visite, planning général…)
+    va dans la section transversale où ce sujet est déjà traité (MOEX, OPC, PLANNING, MOA…) : regarde les derniers points de chaque section
 - Entreprises : retrouve-les dans la liste « QUI FAIT QUOI » ci-dessous, même si la note est approximative
 - Écris-les avec le nom court déjà utilisé dans le CR (texte et action par) : {entreprises_txt or "aucun"}
   (ex : ROC plutôt que ROC - ROCHEFOLLE CONSTRUCTIONS, 3G plutôt que 3G CONSTRUCTION) ; sinon le nom de la liste
@@ -371,8 +385,8 @@ Reprise des enduits Bâtiment 2 réalisée par SERBOIS le 20-10-26. → SERBOIS,
 QUI FAIT QUOI (lot / rôle → entreprise) :
 {chr(10).join("- " + (i.get("lot") or "") + " → " + ((i.get("entreprise") or "").strip() or "NON DÉSIGNÉE") for i in intervenants_edites if i.get("lot"))}
 
-SECTIONS DISPONIBLES :
-{chr(10).join("- " + nom for nom in sections)}
+SECTIONS DISPONIBLES (avec leurs derniers points, pour savoir de quoi parle chacune) :
+{chr(10).join("- " + nom + "".join(chr(10) + "    · " + pt for pt in apercu[nom]) for nom in sections)}
 
 Notes :
 {notes}
