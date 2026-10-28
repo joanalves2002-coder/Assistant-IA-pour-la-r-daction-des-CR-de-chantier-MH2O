@@ -315,15 +315,17 @@ RÈGLES :
 - Noms d'entreprises en MAJUSCULES (SERBOIS, BAZZI, ENEDIS, ROC...)
 - Action par : l'entreprise ou l'intervenant qui doit agir (ex : SERBOIS, MH2O)
 - Pour le : échéance au format JJ-MM-AA si les notes en donnent une (« pour le 6/11 », « avant vendredi »…), sinon vide
-- Fait : vrai uniquement si l'action est entièrement terminée (« reste la façade » = pas fait)
+- Fait le : vide si l'action n'est pas entièrement terminée (« reste la façade » = pas fait) ;
+  si elle est terminée, la date de réalisation au format JJ-MM-AA quand les notes la précisent (« fait le 20/10 », « fait lundi »…), sinon FAIT
 - Le texte ne contient ni l'échéance ni le responsable entre parenthèses : ils vont dans leurs propres champs
 - Section : choisis celle qui correspond le mieux au sujet du point
 - Entreprises déjà connues sur ce chantier (respecte exactement cette orthographe, même si la note est approximative) : {entreprises_txt or "aucune"}
 
-EXEMPLES (texte → action par, pour le, fait) :
-MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → SERBOIS, 06-11-26, non
-Raccordement ENEDIS prévu le 03-04-26, confirmation attendue. → MH2O, (vide), non
-Retouches peinture cage d'escalier A effectuées par BAZZI. → BAZZI, (vide), oui
+EXEMPLES (texte → action par, pour le, fait le) :
+MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → SERBOIS, 06-11-26, (vide)
+Raccordement ENEDIS prévu le 03-04-26, confirmation attendue. → MH2O, (vide), (vide)
+Retouches peinture cage d'escalier A effectuées par BAZZI. → BAZZI, (vide), FAIT
+Reprise des enduits Bâtiment 2 réalisée par SERBOIS le 20-10-26. → SERBOIS, (vide), 20-10-26
 
 SECTIONS DISPONIBLES :
 {chr(10).join("- " + nom for nom in sections)}
@@ -349,9 +351,9 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                                             "texte": {"type": "string"},
                                             "responsable": {"type": "string"},
                                             "pour_le": {"type": "string", "description": "Échéance JJ-MM-AA ou vide"},
-                                            "fait": {"type": "boolean"},
+                                            "fait_le": {"type": "string", "description": "Vide si pas terminé, date JJ-MM-AA si précisée, sinon FAIT"},
                                         },
-                                        "required": ["section", "texte", "responsable", "pour_le", "fait"],
+                                        "required": ["section", "texte", "responsable", "pour_le", "fait_le"],
                                     },
                                 }
                             },
@@ -387,7 +389,7 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
             key="points_edites",
             num_rows="dynamic",
             use_container_width=True,
-            column_order=["section", "texte", "responsable", "pour_le", "fait"],
+            column_order=["section", "texte", "responsable", "pour_le", "fait_le"],
             column_config={
                 "section": st.column_config.SelectboxColumn(
                     "Section", options=list(st.session_state["sections"]), required=True, width="medium"
@@ -395,7 +397,7 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                 "texte": st.column_config.TextColumn("Texte", width="large"),
                 "responsable": st.column_config.TextColumn("Action par", width="small"),
                 "pour_le": st.column_config.TextColumn("Pour le", width="small", help="Échéance JJ-MM-AA"),
-                "fait": st.column_config.CheckboxColumn("Fait", width="small"),
+                "fait_le": st.column_config.TextColumn("Fait le", width="small", help="Vide, FAIT ou date JJ-MM-AA"),
             },
         )
 
@@ -470,7 +472,7 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                             "responsable": (point.get("responsable") or "").strip(),
                             "note_le": date_cr_fmt,
                             "pour_le": (point.get("pour_le") or "").strip().replace("/", "-"),
-                            "fait_le": "FAIT" if point.get("fait") else "",
+                            "fait_le": (point.get("fait_le") or "").strip().replace("/", "-"),
                         }
                         # Toutes les cellules copiées sont vidées, puis remplies selon leur colonne
                         for i, cell in enumerate(cells):
