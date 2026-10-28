@@ -70,25 +70,34 @@ with st.sidebar:
 BLEU = RGBColor(0x00, 0x00, 0xFF)
 BLEU_TITRE = RGBColor(0x98, 0xB5, 0xD8)
 NOIR = RGBColor(0x00, 0x00, 0x00)
+ROUGE = RGBColor(0xFF, 0x00, 0x00)
 
 # ── Fonctions ─────────────────────────────────────────────────────────────────
 
-def ecrire_dans_cellule(cell, texte, gras_majuscules=False):
-    """Écrit en bleu en reprenant la police de la cellule ; entreprises (MAJUSCULES) en gras si demandé."""
+def ecrire_dans_cellule(cell, texte, gras_majuscules=False, couleur=BLEU, ajouter=False):
+    """Écrit en bleu (par défaut) en reprenant la police de la cellule ; entreprises (MAJUSCULES) en gras si demandé.
+    ajouter=True complète le texte existant au lieu de le remplacer."""
     paras = cell.paragraphs
-    for para in paras[1:]:
-        para._p.getparent().remove(para._p)
-    para = paras[0]
-    # Mise en forme du premier run existant (police, taille…) à réutiliser
-    run_modele = next((r for r in para.runs if r.text.strip()), None)
+    if ajouter:
+        para = next((p for p in reversed(paras) if p.text.strip()), paras[-1])
+        runs_texte = [r for r in para.runs if r.text.strip()]
+        run_modele = runs_texte[-1] if runs_texte else None
+        texte = " " + texte
+    else:
+        for para in paras[1:]:
+            para._p.getparent().remove(para._p)
+        para = paras[0]
+        # Mise en forme du premier run existant (police, taille…) à réutiliser
+        run_modele = next((r for r in para.runs if r.text.strip()), None)
     rpr = run_modele._r.rPr if run_modele is not None else None
     if rpr is None and para._p.pPr is not None:
         # Cellule vide : Word garde la mise en forme sur la marque de paragraphe
         rpr = para._p.pPr.find(qn("w:rPr"))
     rpr = deepcopy(rpr) if rpr is not None else None
-    for enfant in list(para._p):
-        if enfant.tag != qn("w:pPr"):
-            para._p.remove(enfant)
+    if not ajouter:
+        for enfant in list(para._p):
+            if enfant.tag != qn("w:pPr"):
+                para._p.remove(enfant)
     tokens = re.split(r'(\b[A-Z]{2}[A-Z0-9\-&/]*\b)', texte) if gras_majuscules else [texte]
     for token in tokens:
         if not token:
@@ -96,7 +105,7 @@ def ecrire_dans_cellule(cell, texte, gras_majuscules=False):
         run = para.add_run(token)
         if rpr is not None:
             run._r.insert(0, deepcopy(rpr))
-        run.font.color.rgb = BLEU
+        run.font.color.rgb = couleur
         if gras_majuscules:
             run.bold = bool(re.match(r'^[A-Z]{2}[A-Z0-9\-&/]*$', token))
 
@@ -261,6 +270,72 @@ def repasser_en_noir(doc):
     return nb
 
 
+def lire_date(texte):
+    """« 31-03-26 », « 31/03/2026 »… en début de texte → date, sinon None."""
+    m = re.match(r'\s*(\d{1,2})[-/](\d{1,2})[-/](\d{4}|\d{2})\b', texte or "")
+    if not m:
+        return None
+    jour, mois, annee = (int(x) for x in m.groups())
+    try:
+        return date(annee if annee > 99 else 2000 + annee, mois, jour)
+    except ValueError:
+        return None
+
+
+def cellules_du_point(doc, pid):
+    """« T12-L5 » → (tableau, cellules réelles de la ligne, rôles des colonnes)."""
+    i, j = (int(x) for x in re.findall(r'\d+', pid))
+    table = doc.tables[i]
+    tcs = table.rows[j]._tr.tc_lst
+    return table, tcs, colonnes_du_tableau(table, len(tcs))
+
+
+def points_ouverts(doc, sections):
+    """Actions du CR précédent pas encore soldées (FAIT LE vide, RAPPEL, EN ATT, EN COURS…).
+    Les points PM (pour mémoire) ne sont pas suivis, sauf s'ils sont déjà en rappel."""
+    ouverts = []
+    for nom, i in sections.items():
+        table = doc.tables[i]
+        for j in range(1, len(table.rows)):
+            pid = f"T{i}-L{j}"
+            _, tcs, roles = cellules_du_point(doc, pid)
+            if not {"texte", "pour_le", "fait_le"} <= roles.keys() or max(roles.values()) >= len(tcs):
+                continue
+            val = {r: " ".join(_Cell(tcs[idx], table).text.split()) for r, idx in roles.items()}
+            fait, pour = val["fait_le"].upper(), val["pour_le"].upper()
+            if not val["texte"] or fait == "FAIT LE":  # ligne vide ou en-tête répété
+                continue
+            if lire_date(fait) or fait in ("FAIT", "NON FAIT", "PM") or fait.startswith("SANS OBJET"):
+                continue
+            if pour == "PM" and not fait.startswith(("RAPPEL", "EN ")):
+                continue
+            ouverts.append({"id": pid, "section": nom, "texte": val["texte"],
+                            "responsable": val.get("responsable", ""), "note_le": val.get("note_le", ""),
+                            "pour_le": val["pour_le"], "fait_le": val["fait_le"]})
+    return ouverts
+
+
+def retard_jours(point, jour):
+    """Jours de retard à la date du CR si l'échéance est dépassée et le point sans suite (vide ou RAPPEL)."""
+    fait = point["fait_le"].upper()
+    if fait and not fait.startswith("RAPPEL"):
+        return None
+    debut = lire_date(point["pour_le"])
+    if debut is None and point["pour_le"].upper() == "SANS DELAI" and "JOURS" in fait:
+        debut = lire_date(point["note_le"])  # « SANS DELAI » : retard compté depuis la note
+    if debut is None or debut >= jour:
+        return None
+    return (jour - debut).days
+
+
+def maj_cellule(doc, pid, role, texte, couleur=BLEU, ajouter=False):
+    """Écrit dans une colonne d'une ligne existante du CR."""
+    table, tcs, roles = cellules_du_point(doc, pid)
+    if role in roles and roles[role] < len(tcs):
+        ecrire_dans_cellule(_Cell(tcs[roles[role]], table), texte,
+                            gras_majuscules=(role == "texte"), couleur=couleur, ajouter=ajouter)
+
+
 # ── Upload ────────────────────────────────────────────────────────────────────
 st.markdown("### 📂 Étape 1 — Upload du CR précédent")
 uploaded_file = st.file_uploader(
@@ -284,6 +359,7 @@ if uploaded_file:
     num_prec, heure_prec = infos_cr_precedent(doc)
     intervenants = intervenants_du_chantier(doc)
     apercu = apercu_sections(doc, sections)
+    ouverts = points_ouverts(doc, sections)
     entreprises = entreprises_connues(doc, sections.values())
 
     st.success(f"✅ {len(doc.tables)} tableaux trouvés · {len(sections)} sections détectées")
@@ -326,6 +402,18 @@ if uploaded_file:
     repasser_noir = st.checkbox(
         "Repasser en noir les ajouts bleus du CR précédent", value=True
     )
+    retards = [(p, n) for p in ouverts if (n := retard_jours(p, date_cr))]
+    maj_retards = st.checkbox(
+        f"⏰ Mettre à jour les {len(retards)} échéances dépassées (FAIT LE → « RAPPEL n JOURS DE RETARD » en rouge)",
+        value=True,
+    )
+    with st.expander(f"Voir les {len(ouverts)} points ouverts du CR précédent, dont {len(retards)} en retard"):
+        st.dataframe(
+            [{"Section": p["section"], "Texte": p["texte"], "Action par": p["responsable"],
+              "Pour le": p["pour_le"], "Fait le": p["fait_le"],
+              "Retard": f"{n} j" if (n := retard_jours(p, date_cr)) else ""} for p in ouverts],
+            use_container_width=True,
+        )
 
     # ── Section ───────────────────────────────────────────────────────────────
     st.markdown("### 🎯 Étape 3 — Sections du CR")
@@ -376,6 +464,11 @@ RÈGLES :
 - Si une note désigne un corps d'état (« le peintre », « l'électricien », « le plombier »…), retrouve l'entreprise du lot correspondant
 - Si un LOT n'a pas d'entreprise, elle n'est pas encore désignée : n'invente aucun nom, écris « l'entreprise du LOT XX (non désignée) » et mets le lot en action par (ex : LOT 19)
 - Pour les lignes sans numéro de lot (concessionnaires : ENEDIS, FRANCE TELECOM, GAZ…), le nom de la ligne désigne l'intervenant (ex : ENEDIS)
+- POINTS OUVERTS : si une note fait avancer ou solde un point ouvert listé plus bas, ne crée PAS de nouveau point ;
+  ajoute une entrée dans « mises_a_jour » avec l'id du point (seulement pour les points clairement concernés) :
+  · fait_le : FAIT, ou la date JJ-MM-AA si les notes la précisent, quand c'est terminé ; EN COURS ou EN ATT pour un simple avancement ; sinon vide (inchangé)
+  · pour_le : nouvelle échéance JJ-MM-AA si les notes en donnent une, sinon vide (inchangé)
+  · complement : courte phrase factuelle ajoutée à la fin du texte existant (ex : « ROC indique une livraison le 12-11-26. »), sinon vide
 
 EXEMPLES (texte → action par, pour le, fait le) :
 MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → SERBOIS, 06-11-26, (vide)
@@ -388,6 +481,9 @@ QUI FAIT QUOI (lot / rôle → entreprise) :
 
 SECTIONS DISPONIBLES (avec leurs derniers points, pour savoir de quoi parle chacune) :
 {chr(10).join("- " + nom + "".join(chr(10) + "    · " + pt for pt in apercu[nom]) for nom in sections)}
+
+POINTS OUVERTS DU CR PRÉCÉDENT ([id] section : texte | action par | pour le | fait le) :
+{chr(10).join(f"[{p['id']}] {p['section']} : {p['texte'][:200]} | {p['responsable']} | {p['pour_le']} | {p['fait_le']}" for p in ouverts) or "aucun"}
 
 Notes :
 {notes}
@@ -413,9 +509,23 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                                     "required": ["section", "texte", "responsable", "pour_le", "fait_le"],
                                     "additionalProperties": False,
                                 },
-                            }
+                            },
+                            "mises_a_jour": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "enum": [p["id"] for p in ouverts]} if ouverts else {"type": "string"},
+                                        "fait_le": {"type": "string", "description": "FAIT, JJ-MM-AA, EN COURS, EN ATT ou vide"},
+                                        "pour_le": {"type": "string", "description": "Nouvelle échéance JJ-MM-AA ou vide"},
+                                        "complement": {"type": "string", "description": "Phrase ajoutée au texte existant, ou vide"},
+                                    },
+                                    "required": ["id", "fait_le", "pour_le", "complement"],
+                                    "additionalProperties": False,
+                                },
+                            },
                         },
-                        "required": ["points"],
+                        "required": ["points", "mises_a_jour"],
                         "additionalProperties": False,
                     }
                     msg = client.beta.messages.create(
@@ -436,8 +546,17 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                         texte_json = next(b.text for b in msg.content if b.type == "text")
                         reponse = json.loads(texte_json)
                         st.session_state.pop("points_edites", None)
+                        st.session_state.pop("maj_editees", None)
+                        par_id = {p["id"]: p for p in ouverts}
                         st.session_state.update({
                             "points": reponse["points"],
+                            "ouverts": ouverts,
+                            # Texte d'origine affiché à côté de chaque mise à jour proposée
+                            "mises_a_jour": [
+                                {"id": m["id"], "section": par_id[m["id"]]["section"], "texte": par_id[m["id"]]["texte"],
+                                 "fait_le": m["fait_le"], "pour_le": m["pour_le"], "complement": m["complement"]}
+                                for m in reponse["mises_a_jour"] if m["id"] in par_id
+                            ],
                             "sections": sections,
                             "num_cr": num_cr,
                             "date_cr": date_cr,
@@ -468,6 +587,26 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
             },
         )
 
+        maj_editees = []
+        if st.session_state.get("mises_a_jour"):
+            st.markdown("#### 🔄 Mises à jour des points du CR précédent")
+            st.caption("Ces points existants seront complétés en bleu. Supprime une ligne pour ignorer la mise à jour.")
+            maj_editees = st.data_editor(
+                st.session_state["mises_a_jour"],
+                key="maj_editees",
+                num_rows="dynamic",
+                use_container_width=True,
+                column_order=["section", "texte", "fait_le", "pour_le", "complement"],
+                disabled=["section", "texte"],
+                column_config={
+                    "section": st.column_config.TextColumn("Section", width="small"),
+                    "texte": st.column_config.TextColumn("Point existant", width="large"),
+                    "fait_le": st.column_config.TextColumn("Fait le", width="small", help="FAIT, JJ-MM-AA, EN COURS, EN ATT ou vide"),
+                    "pour_le": st.column_config.TextColumn("Nouvelle échéance", width="small"),
+                    "complement": st.column_config.TextColumn("Complément ajouté au texte", width="large"),
+                },
+            )
+
         st.markdown("### 📥 Étape 6 — Générer le Word")
         if st.button("📄 Créer le nouveau CR Word", type="primary", use_container_width=True):
             with st.spinner("Insertion dans le document..."):
@@ -486,6 +625,30 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                     if repasser_noir:
                         nb_noir = repasser_en_noir(doc2)
                         st.info(f"🖤 {nb_noir} passages bleus du CR précédent repassés en noir")
+
+                    # Points ouverts : retards recalculés, puis mises à jour validées (prioritaires)
+                    ouverts_par_id = {p["id"]: p for p in st.session_state.get("ouverts", [])}
+                    nb_retards = 0
+                    if maj_retards:
+                        for p in ouverts_par_id.values():
+                            if n := retard_jours(p, dt):
+                                maj_cellule(doc2, p["id"], "fait_le", f"RAPPEL {n} JOURS DE RETARD", couleur=ROUGE)
+                                nb_retards += 1
+                    nb_maj = 0
+                    for m in maj_editees:
+                        if m.get("id") not in ouverts_par_id:
+                            continue
+                        modifie = False
+                        for role in ("fait_le", "pour_le"):
+                            valeur = (m.get(role) or "").strip().replace("/", "-")
+                            if valeur:
+                                maj_cellule(doc2, m["id"], role, valeur)
+                                modifie = True
+                        complement = (m.get("complement") or "").strip()
+                        if complement:
+                            maj_cellule(doc2, m["id"], "texte", complement, ajouter=True)
+                            modifie = True
+                        nb_maj += modifie
 
                     for para in tous_les_paragraphes(doc2):
                         txt = para.text.upper()
@@ -558,7 +721,10 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         use_container_width=True
                     )
-                    st.success(f"✅ CR généré ({nb_ajouts} points insérés) ! Télécharge le fichier ci-dessus.")
+                    st.success(
+                        f"✅ CR généré : {nb_ajouts} nouveaux points, {nb_maj} points mis à jour, "
+                        f"{nb_retards} retards recalculés. Télécharge le fichier ci-dessus."
+                    )
 
                 except Exception as e:
                     st.error(f"Erreur : {e}")
