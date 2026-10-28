@@ -145,7 +145,7 @@ MOIS_FR = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
 
 # Mots en majuscules qui ne sont pas des entreprises
 MOTS_EXCLUS = {
-    "PA", "PM", "EN", "ATT", "ATTENTE", "FAIT", "CR", "RDV", "BAT", "NB", "OK",
+    "PA", "PM", "EN", "ATT", "ATTENTE", "FAIT", "CR", "RDV", "BAT", "NB", "OK", "NON", "ACTION PAR",
     "DESIGNATION", "REUNION", "RÉUNION", "DATE", "STATUT", "OBS", "RESP", "LE", "LA",
     "LES", "DE", "DU", "DES", "ET", "AU", "AUX", "SUR", "POUR", "PAR",
 } | set(JOURS_FR) | set(MOIS_FR)
@@ -201,19 +201,43 @@ def formater_rdv(jour, heure):
 
 
 def entreprises_connues(doc, index_tables):
-    """Noms en MAJUSCULES déjà présents dans les tableaux de sections."""
-    noms = set()
+    """Noms courts utilisés dans la colonne ACTION PAR (ROC, 3G, MOA, MOEX…), du plus fréquent au moins fréquent."""
+    valeurs = []
     for i in index_tables:
-        for row in doc.tables[i].rows[1:]:
+        table = doc.tables[i]
+        for row in table.rows[1:]:
+            tcs = row._tr.tc_lst
+            roles = colonnes_du_tableau(table, len(tcs))
+            if "responsable" in roles:
+                texte = " ".join(_Cell(tcs[roles["responsable"]], table).text.split())
+                # « ROC/ MOEX - MOA » → ROC, MOEX, MOA
+                valeurs += [v.strip() for v in re.split(r'\s*[/,]\s*|\s+-\s+', texte) if v.strip()]
+    simples = set(valeurs)
+    noms = []
+    for v in valeurs:
+        mots = v.split()
+        # « MOA MOEX » = deux noms déjà connus ; « ROC FACADE » reste un nom
+        morceaux = mots if len(mots) > 1 and all(m in simples for m in mots) else [v]
+        noms += [m for m in morceaux if m.upper() not in MOTS_EXCLUS and not m.isdigit()]
+    return sorted(set(noms), key=lambda n: -noms.count(n))
+
+
+def intervenants_du_chantier(doc):
+    """Tableau des intervenants (en-tête DESIGNATION) : [{"lot": ..., "entreprise": ...}].
+    Entreprise vide = pas encore désignée."""
+    lots = {}
+    for table in doc.tables:
+        if not table.rows or "DESIGNATION" not in table.rows[0].cells[0].text.upper():
+            continue
+        for row in table.rows[1:]:
             cells = row.cells
-            # Colonne responsable : tout est pris ; colonne texte : seulement le gras
-            if len(cells) > 1:
-                noms.update(re.findall(r'\b[A-Z][A-Z0-9\-&]{1,}\b', cells[1].text))
-            for para in cells[0].paragraphs:
-                for run in para.runs:
-                    if run.bold:
-                        noms.update(re.findall(r'\b[A-Z][A-Z0-9\-&]{1,}\b', run.text))
-    return sorted(n for n in noms if n not in MOTS_EXCLUS and not n.isdigit())
+            if len(cells) < 2:
+                continue
+            lot = " ".join(cells[0].text.split())
+            if lot and lot not in lots:
+                # 1re ligne du lot = nom de l'entreprise (les suivantes : adresse, contacts)
+                lots[lot] = " ".join(cells[1].text.split())
+    return [{"lot": lot, "entreprise": ent} for lot, ent in lots.items()]
 
 
 def repasser_en_noir(doc):
@@ -248,6 +272,7 @@ if uploaded_file:
                 sections[label] = i
 
     num_prec, heure_prec = infos_cr_precedent(doc)
+    intervenants = intervenants_du_chantier(doc)
     entreprises = entreprises_connues(doc, sections.values())
 
     st.success(f"✅ {len(doc.tables)} tableaux trouvés · {len(sections)} sections détectées")
@@ -271,10 +296,21 @@ if uploaded_file:
             value=formater_rdv(date_cr + timedelta(days=7), heure_prec or "09h00"),
         )
 
+    with st.expander(f"👷 Qui fait quoi — {len(intervenants)} lots / intervenants lus dans le CR"):
+        st.caption("Entreprise vide = pas encore désignée. Tu peux corriger ou compléter.")
+        intervenants_edites = st.data_editor(
+            intervenants,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "lot": st.column_config.TextColumn("Lot / rôle", width="medium"),
+                "entreprise": st.column_config.TextColumn("Entreprise", width="large"),
+            },
+        )
     entreprises_txt = st.text_input(
-        "Entreprises connues (orthographe imposée à l'IA)",
+        "Noms courts utilisés dans la colonne ACTION PAR",
         value=", ".join(entreprises),
-        help="Détectées dans le CR précédent — ajoute ou corrige si besoin",
+        help="L'IA utilise ces noms courts (ex : ROC plutôt que ROC - ROCHEFOLLE CONSTRUCTIONS)",
     )
     repasser_noir = st.checkbox(
         "Repasser en noir les ajouts bleus du CR précédent", value=True
@@ -319,13 +355,21 @@ RÈGLES :
   si elle est terminée, la date de réalisation au format JJ-MM-AA quand les notes la précisent (« fait le 20/10 », « fait lundi »…), sinon FAIT
 - Le texte ne contient ni l'échéance ni le responsable entre parenthèses : ils vont dans leurs propres champs
 - Section : choisis celle qui correspond le mieux au sujet du point
-- Entreprises déjà connues sur ce chantier (respecte exactement cette orthographe, même si la note est approximative) : {entreprises_txt or "aucune"}
+- Entreprises : retrouve-les dans la liste « QUI FAIT QUOI » ci-dessous, même si la note est approximative
+- Écris-les avec le nom court déjà utilisé dans le CR (texte et action par) : {entreprises_txt or "aucun"}
+  (ex : ROC plutôt que ROC - ROCHEFOLLE CONSTRUCTIONS, 3G plutôt que 3G CONSTRUCTION) ; sinon le nom de la liste
+- Si une note désigne un corps d'état (« le peintre », « l'électricien », « le plombier »…), retrouve l'entreprise du lot correspondant
+- Si un LOT n'a pas d'entreprise, elle n'est pas encore désignée : n'invente aucun nom, écris « l'entreprise du LOT XX (non désignée) » et mets le lot en action par (ex : LOT 19)
+- Pour les lignes sans numéro de lot (concessionnaires : ENEDIS, FRANCE TELECOM, GAZ…), le nom de la ligne désigne l'intervenant (ex : ENEDIS)
 
 EXEMPLES (texte → action par, pour le, fait le) :
 MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. → SERBOIS, 06-11-26, (vide)
 Raccordement ENEDIS prévu le 03-04-26, confirmation attendue. → MH2O, (vide), (vide)
 Retouches peinture cage d'escalier A effectuées par BAZZI. → BAZZI, (vide), FAIT
 Reprise des enduits Bâtiment 2 réalisée par SERBOIS le 20-10-26. → SERBOIS, (vide), 20-10-26
+
+QUI FAIT QUOI (lot / rôle → entreprise) :
+{chr(10).join("- " + (i.get("lot") or "") + " → " + ((i.get("entreprise") or "").strip() or "NON DÉSIGNÉE") for i in intervenants_edites if i.get("lot"))}
 
 SECTIONS DISPONIBLES :
 {chr(10).join("- " + nom for nom in sections)}
