@@ -1,6 +1,7 @@
 import streamlit as st
 import anthropic
 import re
+import json
 from docx import Document
 from docx.shared import RGBColor
 from docx.oxml.ns import qn
@@ -393,48 +394,56 @@ Notes :
 
 CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strftime('%d-%m-%y')}"""
 
-                    # L'IA remplit un « formulaire » : chaque colonne du tableau séparément
-                    outil = {
-                        "name": "enregistrer_points",
-                        "description": "Enregistre les points du CR, un par ligne de tableau.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "points": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "section": {"type": "string", "enum": list(sections)},
-                                            "texte": {"type": "string"},
-                                            "responsable": {"type": "string"},
-                                            "pour_le": {"type": "string", "description": "Échéance JJ-MM-AA ou vide"},
-                                            "fait_le": {"type": "string", "description": "Vide si pas terminé, date JJ-MM-AA si précisée, sinon FAIT"},
-                                        },
-                                        "required": ["section", "texte", "responsable", "pour_le", "fait_le"],
+                    # L'IA remplit un « formulaire » : chaque colonne du tableau séparément.
+                    # Le format JSON est garanti par l'API (sortie structurée).
+                    schema = {
+                        "type": "object",
+                        "properties": {
+                            "points": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "section": {"type": "string", "enum": list(sections)},
+                                        "texte": {"type": "string"},
+                                        "responsable": {"type": "string"},
+                                        "pour_le": {"type": "string", "description": "Échéance JJ-MM-AA ou vide"},
+                                        "fait_le": {"type": "string", "description": "Vide si pas terminé, date JJ-MM-AA si précisée, sinon FAIT"},
                                     },
-                                }
-                            },
-                            "required": ["points"],
+                                    "required": ["section", "texte", "responsable", "pour_le", "fait_le"],
+                                    "additionalProperties": False,
+                                },
+                            }
                         },
+                        "required": ["points"],
+                        "additionalProperties": False,
                     }
-                    msg = client.messages.create(
-                        model="claude-sonnet-4-6",
-                        max_tokens=4000,
-                        tools=[outil],
-                        tool_choice={"type": "tool", "name": "enregistrer_points"},
+                    msg = client.beta.messages.create(
+                        model="claude-sonnet-5-5",
+                        max_tokens=16000,
+                        # Effort bas : tâche de mise en forme, on limite la réflexion (et le coût)
+                        output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+                        # Si le modèle refuse la demande, l'API la relance sur un modèle de secours
+                        betas=["server-side-fallback-2026-07-01"],
+                        fallbacks="default",
                         messages=[{"role": "user", "content": prompt}]
                     )
-                    reponse = next(b.input for b in msg.content if b.type == "tool_use")
-                    st.session_state.pop("points_edites", None)
-                    st.session_state.update({
-                        "points": reponse["points"],
-                        "sections": sections,
-                        "num_cr": num_cr,
-                        "date_cr": date_cr,
-                        "prochain": prochain,
-                        "doc_bytes": doc_bytes,
-                    })
+                    if msg.stop_reason == "refusal":
+                        st.error("⚠️ L'IA a refusé de traiter ces notes. Reformule-les puis réessaie.")
+                    elif msg.stop_reason == "max_tokens":
+                        st.error("⚠️ Réponse de l'IA tronquée : découpe tes notes en deux et réessaie.")
+                    else:
+                        texte_json = next(b.text for b in msg.content if b.type == "text")
+                        reponse = json.loads(texte_json)
+                        st.session_state.pop("points_edites", None)
+                        st.session_state.update({
+                            "points": reponse["points"],
+                            "sections": sections,
+                            "num_cr": num_cr,
+                            "date_cr": date_cr,
+                            "prochain": prochain,
+                            "doc_bytes": doc_bytes,
+                        })
                 except Exception as e:
                     st.error(f"Erreur API : {e}")
 
