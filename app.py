@@ -470,7 +470,7 @@ CR n° : {num_cr} — Date du jour : {JOURS_FR[date_cr.weekday()]} {date_cr.strf
                             "responsable": (point.get("responsable") or "").strip(),
                             "note_le": date_cr_fmt,
                             "pour_le": (point.get("pour_le") or "").strip().replace("/", "-"),
-                            "fait_le": date_cr_fmt if point.get("fait") else "",
+                            "fait_le": "FAIT" if point.get("fait") else "",
                         }
                         # Toutes les cellules copiées sont vidées, puis remplies selon leur colonne
                         for i, cell in enumerate(cells):
