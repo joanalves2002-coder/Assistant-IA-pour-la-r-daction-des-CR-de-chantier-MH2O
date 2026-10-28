@@ -4,7 +4,8 @@ import re
 from docx import Document
 from docx.shared import Pt, RGBColor
 import io
-from datetime import date
+import os
+from datetime import date, timedelta
 
 # ── Config page ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -40,11 +41,19 @@ st.markdown("""
 
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
-    api_key = st.text_input("Clé API Claude", type="password", placeholder="sk-ant-...")
+    # Clé lue dans .streamlit/secrets.toml ou la variable d'environnement, sinon saisie manuelle
+    try:
+        cle_defaut = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        cle_defaut = ""
+    cle_defaut = cle_defaut or os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = st.text_input("Clé API Claude", value=cle_defaut, type="password", placeholder="sk-ant-...")
+    if cle_defaut:
+        st.caption("🔑 Clé chargée automatiquement")
     st.markdown("---")
     st.markdown("""
 ### 📖 Comment utiliser
-1. Entre ta clé API Claude
+1. Entre ta clé API Claude (ou mets-la dans `.streamlit/secrets.toml`)
 2. Upload le Word du CR précédent
 3. Renseigne les infos du nouveau CR
 4. Choisis la section à mettre à jour
@@ -112,6 +121,76 @@ def parse_ligne(ligne):
     return ligne.strip(), statut, responsable
 
 
+JOURS_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
+MOIS_FR = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
+           "JUILLET", "AOÛT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DÉCEMBRE"]
+
+# Mots en majuscules qui ne sont pas des entreprises
+MOTS_EXCLUS = {
+    "PA", "PM", "EN", "ATT", "ATTENTE", "FAIT", "CR", "RDV", "BAT", "NB", "OK",
+    "DESIGNATION", "REUNION", "RÉUNION", "DATE", "STATUT", "OBS", "RESP", "LE", "LA",
+    "LES", "DE", "DU", "DES", "ET", "AU", "AUX", "SUR", "POUR", "PAR",
+} | set(JOURS_FR) | set(MOIS_FR)
+
+
+def tous_les_paragraphes(doc):
+    """Paragraphes du corps + ceux des cellules de tableaux."""
+    paragraphes = list(doc.paragraphs)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                paragraphes.extend(cell.paragraphs)
+    return paragraphes
+
+
+def infos_cr_precedent(doc):
+    """Extrait (numéro, heure du RDV) du CR précédent, None si introuvable."""
+    numero, heure = None, None
+    for para in tous_les_paragraphes(doc):
+        txt = para.text.upper()
+        if numero is None and ("CR DE REUNION" in txt or "CR DE RÉUNION" in txt):
+            m = re.search(r'N°\s*(\d+)', txt)
+            if m:
+                numero = int(m.group(1))
+        if heure is None and "PROCHAIN RDV" in txt:
+            m = re.search(r'(\d{1,2})\s*[H:]\s*(\d{2})?', txt)
+            if m:
+                heure = f"{int(m.group(1)):02d}h{m.group(2) or '00'}"
+    return numero, heure
+
+
+def formater_rdv(jour, heure):
+    """Ex : MARDI 03 NOVEMBRE 2026 à 09h00"""
+    return f"{JOURS_FR[jour.weekday()]} {jour.day:02d} {MOIS_FR[jour.month - 1]} {jour.year} à {heure}"
+
+
+def entreprises_connues(doc, index_tables):
+    """Noms en MAJUSCULES déjà présents dans les tableaux de sections."""
+    noms = set()
+    for i in index_tables:
+        for row in doc.tables[i].rows[1:]:
+            cells = row.cells
+            # Colonne responsable : tout est pris ; colonne texte : seulement le gras
+            if len(cells) > 1:
+                noms.update(re.findall(r'\b[A-Z][A-Z0-9\-&]{1,}\b', cells[1].text))
+            for para in cells[0].paragraphs:
+                for run in para.runs:
+                    if run.bold:
+                        noms.update(re.findall(r'\b[A-Z][A-Z0-9\-&]{1,}\b', run.text))
+    return sorted(n for n in noms if n not in MOTS_EXCLUS and not n.isdigit())
+
+
+def repasser_en_noir(doc):
+    """Les ajouts bleus du CR précédent deviennent de l'historique (noir)."""
+    nb = 0
+    for para in tous_les_paragraphes(doc):
+        for run in para.runs:
+            if run.font.color.type is not None and run.font.color.rgb == BLEU:
+                run.font.color.rgb = NOIR
+                nb += 1
+    return nb
+
+
 # ── Upload ────────────────────────────────────────────────────────────────────
 st.markdown("### 📂 Étape 1 — Upload du CR précédent")
 uploaded_file = st.file_uploader(
@@ -132,17 +211,38 @@ if uploaded_file:
                 label = f"{en_tete[:60]} (tableau {i+1})"
                 sections[label] = i
 
+    num_prec, heure_prec = infos_cr_precedent(doc)
+    entreprises = entreprises_connues(doc, sections.values())
+
     st.success(f"✅ {len(doc.tables)} tableaux trouvés · {len(sections)} sections détectées")
 
     # ── Infos CR ─────────────────────────────────────────────────────────────
     st.markdown("### 📋 Étape 2 — Informations du nouveau CR")
     c1, c2, c3 = st.columns(3)
     with c1:
-        num_cr = st.text_input("Numéro du CR", placeholder="Ex : 29")
+        num_cr = st.text_input(
+            "Numéro du CR",
+            value=str(num_prec + 1) if num_prec is not None else "",
+            placeholder="Ex : 29",
+            help=f"CR précédent : N°{num_prec}" if num_prec is not None else None,
+        )
     with c2:
-        date_cr = st.date_input("Date de la réunion", value=date.today())
+        date_cr = st.date_input("Date de la réunion", value=date.today(), format="DD/MM/YYYY")
     with c3:
-        prochain = st.text_input("Prochain RDV", placeholder="Ex : MARDI 03 NOVEMBRE 2026 à 09h00")
+        # Par défaut : une semaine plus tard, même heure que le RDV précédent
+        prochain = st.text_input(
+            "Prochain RDV",
+            value=formater_rdv(date_cr + timedelta(days=7), heure_prec or "09h00"),
+        )
+
+    entreprises_txt = st.text_input(
+        "Entreprises connues (orthographe imposée à l'IA)",
+        value=", ".join(entreprises),
+        help="Détectées dans le CR précédent — ajoute ou corrige si besoin",
+    )
+    repasser_noir = st.checkbox(
+        "Repasser en noir les ajouts bleus du CR précédent", value=True
+    )
 
     # ── Section ───────────────────────────────────────────────────────────────
     st.markdown("### 🎯 Étape 3 — Section à mettre à jour")
@@ -180,6 +280,7 @@ RÈGLES :
 - Responsable entre parenthèses : PA (SERBOIS)
 - Format : Texte. STATUT (RESPONSABLE)
 - Pas d'introduction, commence directement par les points
+- Entreprises déjà connues sur ce chantier (respecte exactement cette orthographe, même si la note est approximative) : {entreprises_txt or "aucune"}
 
 EXEMPLES :
 MH2O demande à SERBOIS de transmettre un planning actualisé pour le Bâtiment 3. PA (SERBOIS)
@@ -232,22 +333,14 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
                     date_fr = dt.strftime("%d/%m/%Y")
 
                     # Jours en français pour le titre
-                    jours_fr = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
-                    mois_fr = ["JANVIER", "FÉVRIER", "MARS", "AVRIL", "MAI", "JUIN",
-                               "JUILLET", "AOÛT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DÉCEMBRE"]
-                    jour_nom = jours_fr[dt.weekday()]
-                    mois_nom = mois_fr[dt.month - 1]
-                    date_titre = f"{jour_nom} {dt.day} {mois_nom} {dt.year}"
+                    date_titre = f"{JOURS_FR[dt.weekday()]} {dt.day} {MOIS_FR[dt.month - 1]} {dt.year}"
 
-                    # Collecter TOUS les paragraphes : corps + cellules de tableaux
-                    tous_paragraphes = list(doc2.paragraphs)
-                    for tbl in doc2.tables:
-                        for row in tbl.rows:
-                            for cell in row.cells:
-                                for cp in cell.paragraphs:
-                                    tous_paragraphes.append(cp)
+                    # Avant d'ajouter le nouveau bleu, l'ancien passe en noir
+                    if repasser_noir:
+                        nb_noir = repasser_en_noir(doc2)
+                        st.info(f"🖤 {nb_noir} passages bleus du CR précédent repassés en noir")
 
-                    for para in tous_paragraphes:
+                    for para in tous_les_paragraphes(doc2):
                         txt = para.text.upper()
 
                         # Mise à jour numéro + date dans le titre principal
@@ -329,5 +422,3 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
 
 else:
     st.info("👆 Upload le fichier Word du CR précédent pour commencer")
-
-claude rc
