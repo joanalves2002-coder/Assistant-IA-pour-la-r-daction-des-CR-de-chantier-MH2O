@@ -329,3 +329,5 @@ CR n° : {num_cr} — Date : {date_cr.strftime('%d/%m/%Y')}"""
 
 else:
     st.info("👆 Upload le fichier Word du CR précédent pour commencer")
+
+claude rc
